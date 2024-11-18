@@ -1,4 +1,5 @@
 import tkinter as tk
+import math
 
 class BridgeBuilder:
     def __init__(self, root):
@@ -15,6 +16,9 @@ class BridgeBuilder:
         self.links = []  # Store tuples of (node1_id, node2_id, canvas_line_id)
         self.node_id_counter = 0
         self.selected_node = None
+
+        # Define density (weight per pixel length)
+        self.density = 1.0  # grams per pixel
 
         # Add initial nodes at the edges of the platforms
         self.add_initial_nodes()
@@ -103,7 +107,34 @@ class BridgeBuilder:
         links_data = [(l[0], l[1]) for l in self.links]
         return nodes_data, links_data
 
+    def calculate_node_weights(self):
+        # Initialize weights for each node
+        node_weights = {node_id: 0.0 for node_id in self.nodes.keys()}
+
+        # Calculate the weight of each link and distribute it to connected nodes
+        for link in self.links:
+            node1_id, node2_id, _ = link
+            x1, y1 = self.nodes[node1_id]['x'], self.nodes[node1_id]['y']
+            x2, y2 = self.nodes[node2_id]['x'], self.nodes[node2_id]['y']
+
+            # Calculate length of the link
+            length = math.hypot(x2 - x1, y2 - y1)
+
+            # Calculate weight of the link
+            link_weight = length * self.density
+
+            # Distribute half the weight to each node
+            node_weights[node1_id] += link_weight / 2.0
+            node_weights[node2_id] += link_weight / 2.0
+
+        return node_weights
+
 if __name__ == "__main__":
     root = tk.Tk()
     app = BridgeBuilder(root)
     root.mainloop()
+
+    # After closing the GUI, calculate and print node weights
+    node_weights = app.calculate_node_weights()
+    for node_id, weight in node_weights.items():
+        print(f"Node {node_id}: Weight = {weight:.2f} grams")
