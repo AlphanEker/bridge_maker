@@ -1,5 +1,16 @@
 import tkinter as tk
 import math
+import numpy as np
+import threading
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import random
+
+try:
+    import networkx as nx
+except ImportError:
+    print("NetworkX library is required for sturdiness calculation. Install it using 'pip install networkx'.")
 
 class BridgeBuilder:
     def __init__(self, root):
@@ -27,13 +38,20 @@ class BridgeBuilder:
         # Bind events
         self.canvas.bind("<Button-1>", self.on_left_click)
 
+        # Add "Start Optimization" button
+        self.optimize_button = tk.Button(self.root, text="Start Optimization", command=self.start_optimization)
+        self.optimize_button.pack(side=tk.BOTTOM)
+
+        # RL Agent placeholder
+        self.rl_agent = None
+
     def add_initial_nodes(self):
-        # Left platform node
+        # Left platform node (ID 0)
         x_left = 150  # Right edge of the left platform
         y_left = 525  # Vertically centered on the platform
         self.create_node_at_position(x_left, y_left, initial=True)
 
-        # Right platform node
+        # Right platform node (ID 1)
         x_right = 650  # Left edge of the right platform
         y_right = 525
         self.create_node_at_position(x_right, y_right, initial=True)
@@ -92,6 +110,11 @@ class BridgeBuilder:
     def connect_nodes(self, node1_id, node2_id):
         x1, y1 = self.nodes[node1_id]['x'], self.nodes[node1_id]['y']
         x2, y2 = self.nodes[node2_id]['x'], self.nodes[node2_id]['y']
+
+        # Check if the line already exists
+        if self.is_connected(node1_id, node2_id):
+            return False
+
         line_id = self.canvas.create_line(x1, y1, x2, y2, fill="black", width=2)
 
         # Calculate the weight of the link
@@ -104,6 +127,23 @@ class BridgeBuilder:
         # Update connections
         self.nodes[node1_id]['connections'].append(node2_id)
         self.nodes[node2_id]['connections'].append(node1_id)
+        return True
+
+    def remove_link(self, node1_id, node2_id):
+        if self.is_connected(node1_id, node2_id):
+            # Find the link
+            link_to_remove = None
+            for link in self.links:
+                if (link[0] == node1_id and link[1] == node2_id) or (link[0] == node2_id and link[1] == node1_id):
+                    link_to_remove = link
+                    break
+            if link_to_remove:
+                self.links.remove(link_to_remove)
+                self.nodes[node1_id]['connections'].remove(node2_id)
+                self.nodes[node2_id]['connections'].remove(node1_id)
+                self.canvas.delete(link_to_remove[2])  # Remove the line from the canvas
+                return True
+        return False
 
     def get_node_id_by_canvas_id(self, canvas_id):
         for node_id, node in self.nodes.items():
@@ -137,7 +177,7 @@ class BridgeBuilder:
         # For each node, find connected nodes below it (supporting nodes)
         for node_id, node in self.nodes.items():
             node_y = node['y']
-            for connected_node_id in node['connections']:
+            for connected_node_id in self.nodes[node_id]['connections']:
                 connected_node_y = self.nodes[connected_node_id]['y']
                 if connected_node_y > node_y:
                     # The connected node is below; it's a supporting node
@@ -156,6 +196,314 @@ class BridgeBuilder:
                     node_loads[support_node_id] += load_per_support
 
         return node_loads
+
+    # Additional methods for RL interaction
+
+    def get_state(self):
+        # Return adjacency matrix as state representation
+        num_nodes = len(self.nodes)
+        adjacency_matrix = np.zeros((num_nodes, num_nodes))
+        for link in self.links:
+            node1_id, node2_id = link[0], link[1]
+            adjacency_matrix[node1_id][node2_id] = 1
+            adjacency_matrix[node2_id][node1_id] = 1
+        return adjacency_matrix
+
+    def calculate_reward(self):
+        node_loads = self.calculate_node_loads()
+        load_values = list(node_loads.values())
+        variance = np.var(load_values)
+        total_weight = sum(load_values)
+        sturdiness = self.calculate_sturdiness()
+
+        # Use the continuous connectivity metric
+        connectivity_reward = self.calculate_connectivity_metric()
+
+        # Define weights for the reward components
+        alpha = -0.5  # Adjusted variance penalty weight
+        beta = -0.2  # Total weight penalty
+        gamma = 10.0  # Sturdiness reward weight
+        theta = 2.0 # Connectivity
+        # Total reward
+        reward = alpha * variance + beta * total_weight + gamma * sturdiness + theta * connectivity_reward
+
+        return reward
+
+    def is_bridge_connected(self):
+        # Check if there's a path from start to end node
+        start_node = 0  # Left platform node ID
+        end_node = 1    # Right platform node ID
+
+        visited = set()
+        self.dfs(start_node, visited)
+        return end_node in visited
+
+    def calculate_connectivity_metric(self):
+        try:
+            G = nx.Graph()
+            G.add_nodes_from(self.nodes.keys())
+            G.add_edges_from([(link[0], link[1]) for link in self.links])
+            if nx.has_path(G, 0, 1):
+                path_length = nx.shortest_path_length(G, 0, 1)
+                if path_length == 0:
+                    connectivity_reward = 10  # Assign maximum reward when path_length is zero
+                else:
+                    connectivity_reward = 10 / path_length
+            else:
+                connectivity_reward = -100  # Penalty if no path exists
+        except Exception as e:
+            print(f"Exception in calculate_connectivity_metric: {e}")
+            connectivity_reward = -100
+        return connectivity_reward
+
+    def dfs(self, node_id, visited):
+        visited.add(node_id)
+        for neighbor in self.nodes[node_id]['connections']:
+            if neighbor not in visited:
+                self.dfs(neighbor, visited)
+
+    def calculate_sturdiness(self):
+        try:
+            G = nx.Graph()
+            G.add_nodes_from(self.nodes.keys())
+            G.add_edges_from([(link[0], link[1]) for link in self.links])
+            sturdiness = nx.edge_connectivity(G, 0, 1)
+        except Exception as e:
+            print(f"Exception in calculate_sturdiness: {e}")
+            sturdiness = 0
+        return sturdiness
+
+    def start_optimization(self):
+        # Disable the optimize button to prevent multiple clicks
+        self.optimize_button.config(state=tk.DISABLED)
+
+        # Start the RL agent in a separate thread to prevent GUI freezing
+        threading.Thread(target=self.run_rl_agent).start()
+
+    def run_rl_agent(self):
+        # Instantiate the RL agent
+        self.rl_agent = RLAgent(self)
+
+        # Run the optimization
+        self.rl_agent.train(episodes=50)
+
+        # Re-enable the optimize button
+        self.optimize_button.config(state=tk.NORMAL)
+
+
+class DQN(nn.Module):
+    def __init__(self, state_size, action_size):
+        super(DQN, self).__init__()
+        # Define neural network layers
+        self.fc1 = nn.Linear(state_size, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.output = nn.Linear(128, action_size)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = self.output(x)
+        return x
+
+
+class RLAgent:
+    def __init__(self, bridge_builder):
+        self.bridge_builder = bridge_builder
+
+        # Get state and action sizes
+        num_nodes = len(self.bridge_builder.nodes)
+        self.num_nodes = num_nodes
+        self.state_size = num_nodes * num_nodes  # Flattened adjacency matrix
+        self.action_size = num_nodes * num_nodes * 2  # For add and remove actions
+
+        # Initialize neural network and optimizer
+        self.model = DQN(self.state_size, self.action_size)
+        self.target_model = DQN(self.state_size, self.action_size)
+        self.update_target_model()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        self.criterion = nn.MSELoss()
+
+        # Hyperparameters
+        self.gamma = 0.99  # Discount factor
+        self.epsilon = 1.0  # Exploration rate
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.995
+
+        # Experience replay memory
+        self.memory = []
+        self.batch_size = 64
+        self.memory_capacity = 10000
+
+        # Steps before updating the target network
+        self.update_target_steps = 1000
+        self.steps_done = 0
+
+    def get_valid_actions(self):
+        valid_actions = []
+        num_nodes = self.num_nodes
+        total_actions_per_type = num_nodes * num_nodes
+
+        for action_type_index in range(2):  # 0: 'add', 1: 'remove'
+            for node1_id in range(num_nodes):
+                for node2_id in range(num_nodes):
+                    if node1_id == node2_id:
+                        continue  # Skip invalid node pairs
+
+                    if action_type_index == 0:  # 'add' action
+                        if not self.bridge_builder.is_connected(node1_id, node2_id):
+                            action_index = self.encode_action(action_type_index, node1_id, node2_id)
+                            valid_actions.append(action_index)
+                    else:  # 'remove' action
+                        if self.bridge_builder.is_connected(node1_id, node2_id):
+                            action_index = self.encode_action(action_type_index, node1_id, node2_id)
+                            valid_actions.append(action_index)
+        return valid_actions
+
+    def update_target_model(self):
+        self.target_model.load_state_dict(self.model.state_dict())
+
+    def remember(self, state, action, reward, next_state, done):
+        # Store experiences in memory
+        if len(self.memory) >= self.memory_capacity:
+            self.memory.pop(0)
+        self.memory.append((state, action, reward, next_state, done))
+
+    def choose_action(self, state):
+        valid_actions = self.get_valid_actions()
+        if not valid_actions:
+            # No valid actions available; end the episode or take appropriate action
+            return None
+
+        if np.random.rand() <= self.epsilon:
+            # Randomly select a valid action
+            action = random.choice(valid_actions)
+        else:
+            # Predict action values
+            state_tensor = torch.FloatTensor(state).unsqueeze(0)
+            with torch.no_grad():
+                action_values = self.model(state_tensor).squeeze()
+
+                # Mask invalid actions
+                mask = torch.full((self.action_size,), float('-inf'))
+                mask[valid_actions] = 0  # Set valid actions to 0 to keep their original values
+                masked_action_values = action_values + mask
+
+                # Select the action with the highest masked Q-value
+                action = torch.argmax(masked_action_values).item()
+        return action
+
+    def replay(self):
+        if len(self.memory) < self.batch_size:
+            return  # Not enough samples to train
+
+        minibatch = random.sample(self.memory, self.batch_size)
+
+        state_batch = torch.FloatTensor([data[0] for data in minibatch])
+        action_batch = torch.LongTensor([data[1] for data in minibatch]).unsqueeze(1)
+        reward_batch = torch.FloatTensor([data[2] for data in minibatch])
+        next_state_batch = torch.FloatTensor([data[3] for data in minibatch])
+        done_batch = torch.FloatTensor([data[4] for data in minibatch])
+
+        # Compute Q(s_t, a)
+        q_values = self.model(state_batch).gather(1, action_batch).squeeze()
+
+        # Compute Q(s_{t+1}, a)
+        with torch.no_grad():
+            next_q_values = self.target_model(next_state_batch).max(1)[0]
+
+        # Compute target values
+        target_q_values = reward_batch + (self.gamma * next_q_values * (1 - done_batch))
+
+        # Compute loss
+        loss = self.criterion(q_values, target_q_values)
+
+        # Optimize the model
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        # Decrease epsilon
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+    def train(self, episodes):
+        max_steps = 50  # Define maximum steps per episode
+        for episode in range(episodes):
+            state = self.bridge_builder.get_state().flatten()
+            total_reward = 0
+
+            for step in range(max_steps):
+                action = self.choose_action(state)
+                if action is None:
+                    # No valid actions available; end the episode
+                    print("No valid actions available. Ending episode early.")
+                    break
+
+                action_type, node1_id, node2_id = self.decode_action(action)
+                if action_type is None:
+                    # Invalid action decoding; skip this action
+                    continue
+
+                # Perform action
+                success = False
+                if action_type == 'add':
+                    success = self.bridge_builder.connect_nodes(node1_id, node2_id)
+                else:
+                    success = self.bridge_builder.remove_link(node1_id, node2_id)
+
+                # Ensure the action has been performed
+                if not success:
+                    reward = -10  # Penalty for invalid action
+                    next_state = state
+                else:
+                    # Update GUI (if necessary)
+                    self.bridge_builder.root.update_idletasks()
+                    self.bridge_builder.root.update()
+
+                    # Get reward and next state
+                    reward = self.bridge_builder.calculate_reward()
+                    next_state = self.bridge_builder.get_state().flatten()
+
+                total_reward += reward
+
+                # Store experience
+                self.remember(state, action, reward, next_state, False)
+
+                # Train the model
+                self.replay()
+
+                # Update state
+                state = next_state
+
+                self.steps_done += 1
+                if self.steps_done % self.update_target_steps == 0:
+                    self.update_target_model()
+
+            print(f"Episode {episode + 1}/{episodes}, Total Reward: {total_reward}, Epsilon: {self.epsilon:.2f}")
+
+    def decode_action(self, action_index):
+        num_nodes = self.num_nodes
+        total_actions_per_type = num_nodes * num_nodes
+        action_type_index = action_index // total_actions_per_type
+        node_pair_index = action_index % total_actions_per_type
+
+        node1_id = node_pair_index // num_nodes
+        node2_id = node_pair_index % num_nodes
+
+        if node1_id == node2_id or node1_id >= num_nodes or node2_id >= num_nodes:
+            # Invalid action
+            return None, None, None
+
+        action_type = 'add' if action_type_index == 0 else 'remove'
+        return action_type, node1_id, node2_id
+
+    def encode_action(self, action_type_index, node1_id, node2_id):
+        num_nodes = self.num_nodes
+        total_actions_per_type = num_nodes * num_nodes
+        node_pair_index = node1_id * num_nodes + node2_id
+        action_index = action_type_index * total_actions_per_type + node_pair_index
+        return action_index
+
 
 if __name__ == "__main__":
     root = tk.Tk()
