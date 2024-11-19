@@ -51,6 +51,9 @@ class BridgeBuilder:
         self.stop_button = tk.Button(self.root, text="Stop Evaluation", command=self.stop_evaluation, state=tk.DISABLED)
         self.stop_button.pack(side=tk.BOTTOM)
 
+        self.delete_links_button = tk.Button(self.root, text="Delete All Links", command=self.delete_all_links)
+        self.delete_links_button.pack(side=tk.LEFT)
+
         # Evaluation control flag
         self.evaluating = False
 
@@ -86,6 +89,24 @@ class BridgeBuilder:
         self.stop_button.config(state=tk.DISABLED)
         self.evaluate_button.config(state=tk.NORMAL)
         self.optimize_button.config(state=tk.NORMAL)
+
+    def delete_all_links(self):
+        # Remove all link lines from the canvas
+        for link in self.links:
+            self.canvas.delete(link[2])  # link[2] is the line_id
+
+        # Clear the links list
+        self.links.clear()
+
+        # Clear connections in each node
+        for node in self.nodes.values():
+            node['connections'].clear()
+
+        # Update the GUI
+        self.root.update_idletasks()
+        self.root.update()
+
+        print("All links have been deleted.")
 
     def add_initial_nodes(self):
         # Left platform node (ID 0)
