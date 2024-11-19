@@ -12,6 +12,8 @@ try:
 except ImportError:
     print("NetworkX library is required for sturdiness calculation. Install it using 'pip install networkx'.")
 
+MAX_NODES = 15
+
 class BridgeBuilder:
     def __init__(self, root):
         self.root = root
@@ -200,14 +202,27 @@ class BridgeBuilder:
     # Additional methods for RL interaction
 
     def get_state(self):
-        # Return adjacency matrix as state representation
         num_nodes = len(self.nodes)
-        adjacency_matrix = np.zeros((num_nodes, num_nodes))
+        adjacency_matrix = np.zeros((MAX_NODES, MAX_NODES))
+        positions = np.zeros(MAX_NODES * 2)
+
+        # Fill in the adjacency matrix
         for link in self.links:
             node1_id, node2_id = link[0], link[1]
             adjacency_matrix[node1_id][node2_id] = 1
             adjacency_matrix[node2_id][node1_id] = 1
-        return adjacency_matrix
+
+        # Fill in the positions
+        for idx, node_id in enumerate(sorted(self.nodes.keys())):
+            x = self.nodes[node_id]['x'] / self.canvas.winfo_width()
+            y = self.nodes[node_id]['y'] / self.canvas.winfo_height()
+            positions[idx * 2] = x
+            positions[idx * 2 + 1] = y
+
+        # Flatten adjacency matrix and concatenate positions
+        state = np.concatenate([adjacency_matrix.flatten(), positions])
+
+        return state
 
     def calculate_reward(self):
         node_loads = self.calculate_node_loads()
@@ -220,10 +235,10 @@ class BridgeBuilder:
         connectivity_reward = self.calculate_connectivity_metric()
 
         # Define weights for the reward components
-        alpha = -0.5  # Adjusted variance penalty weight
-        beta = -0.2  # Total weight penalty
-        gamma = 10.0  # Sturdiness reward weight
-        theta = 2.0 # Connectivity
+        alpha = -1.0  # Adjusted variance penalty weight
+        beta = -0.5  # Total weight penalty
+        gamma = 3.0  # Sturdiness reward weight
+        theta = 4.0 # Connectivity
         # Total reward
         reward = alpha * variance + beta * total_weight + gamma * sturdiness + theta * connectivity_reward
 
@@ -294,10 +309,9 @@ class BridgeBuilder:
 class DQN(nn.Module):
     def __init__(self, state_size, action_size):
         super(DQN, self).__init__()
-        # Define neural network layers
-        self.fc1 = nn.Linear(state_size, 128)
-        self.fc2 = nn.Linear(128, 128)
-        self.output = nn.Linear(128, action_size)
+        self.fc1 = nn.Linear(state_size, 512)
+        self.fc2 = nn.Linear(512, 256)
+        self.output = nn.Linear(256, action_size)
 
     def forward(self, x):
         x = torch.relu(self.fc1(x))
@@ -310,11 +324,11 @@ class RLAgent:
     def __init__(self, bridge_builder):
         self.bridge_builder = bridge_builder
 
-        # Get state and action sizes
         num_nodes = len(self.bridge_builder.nodes)
         self.num_nodes = num_nodes
-        self.state_size = num_nodes * num_nodes  # Flattened adjacency matrix
-        self.action_size = num_nodes * num_nodes * 2  # For add and remove actions
+
+        self.state_size = MAX_NODES * MAX_NODES + MAX_NODES * 2
+        self.action_size = MAX_NODES * MAX_NODES * 2  # For add and remove actions
 
         # Initialize neural network and optimizer
         self.model = DQN(self.state_size, self.action_size)
@@ -324,10 +338,10 @@ class RLAgent:
         self.criterion = nn.MSELoss()
 
         # Hyperparameters
-        self.gamma = 0.99  # Discount factor
+        self.gamma = 0.993  # Discount factor
         self.epsilon = 1.0  # Exploration rate
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.995
+        self.epsilon_decay = 0.996
 
         # Experience replay memory
         self.memory = []
@@ -481,28 +495,26 @@ class RLAgent:
 
             print(f"Episode {episode + 1}/{episodes}, Total Reward: {total_reward}, Epsilon: {self.epsilon:.2f}")
 
+    def encode_action(self, action_type_index, node1_id, node2_id):
+        total_actions_per_type = MAX_NODES * MAX_NODES
+        node_pair_index = node1_id * MAX_NODES + node2_id
+        action_index = action_type_index * total_actions_per_type + node_pair_index
+        return action_index
+
     def decode_action(self, action_index):
-        num_nodes = self.num_nodes
-        total_actions_per_type = num_nodes * num_nodes
+        total_actions_per_type = MAX_NODES * MAX_NODES
         action_type_index = action_index // total_actions_per_type
         node_pair_index = action_index % total_actions_per_type
 
-        node1_id = node_pair_index // num_nodes
-        node2_id = node_pair_index % num_nodes
+        node1_id = node_pair_index // MAX_NODES
+        node2_id = node_pair_index % MAX_NODES
 
-        if node1_id == node2_id or node1_id >= num_nodes or node2_id >= num_nodes:
+        if node1_id == node2_id or node1_id >= self.num_nodes or node2_id >= self.num_nodes:
             # Invalid action
             return None, None, None
 
         action_type = 'add' if action_type_index == 0 else 'remove'
         return action_type, node1_id, node2_id
-
-    def encode_action(self, action_type_index, node1_id, node2_id):
-        num_nodes = self.num_nodes
-        total_actions_per_type = num_nodes * num_nodes
-        node_pair_index = node1_id * num_nodes + node2_id
-        action_index = action_type_index * total_actions_per_type + node_pair_index
-        return action_index
 
 
 if __name__ == "__main__":
