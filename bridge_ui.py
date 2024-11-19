@@ -44,8 +44,48 @@ class BridgeBuilder:
         self.optimize_button = tk.Button(self.root, text="Start Optimization", command=self.start_optimization)
         self.optimize_button.pack(side=tk.BOTTOM)
 
+        # Add "Run Evaluation" and "Stop Evaluation" buttons
+        self.evaluate_button = tk.Button(self.root, text="Run Evaluation", command=self.start_evaluation)
+        self.evaluate_button.pack(side=tk.BOTTOM)
+
+        self.stop_button = tk.Button(self.root, text="Stop Evaluation", command=self.stop_evaluation, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.BOTTOM)
+
+        # Evaluation control flag
+        self.evaluating = False
+
         # RL Agent placeholder
         self.rl_agent = None
+
+    def start_evaluation(self):
+        if self.rl_agent is None:
+            print("Model is not trained yet. Please train the model before evaluation.")
+            return
+
+        # Disable other buttons to prevent conflicts
+        self.optimize_button.config(state=tk.DISABLED)
+        self.evaluate_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+
+        # Set the evaluating flag
+        self.evaluating = True
+
+        # Start evaluation in a separate thread
+        threading.Thread(target=self.run_evaluation).start()
+
+    def stop_evaluation(self):
+        self.evaluating = False
+        self.stop_button.config(state=tk.DISABLED)
+        self.evaluate_button.config(state=tk.NORMAL)
+        self.optimize_button.config(state=tk.NORMAL)
+
+    def run_evaluation(self):
+        # Run the evaluation using the RL agent
+        self.rl_agent.evaluate()
+        # After evaluation, reset buttons
+        self.stop_button.config(state=tk.DISABLED)
+        self.evaluate_button.config(state=tk.NORMAL)
+        self.optimize_button.config(state=tk.NORMAL)
 
     def add_initial_nodes(self):
         # Left platform node (ID 0)
@@ -323,6 +363,7 @@ class DQN(nn.Module):
 class RLAgent:
     def __init__(self, bridge_builder):
         self.bridge_builder = bridge_builder
+        self.training = False  # Flag to indicate training is in progress
 
         num_nodes = len(self.bridge_builder.nodes)
         self.num_nodes = num_nodes
@@ -385,7 +426,7 @@ class RLAgent:
     def choose_action(self, state):
         valid_actions = self.get_valid_actions()
         if not valid_actions:
-            # No valid actions available; end the episode or take appropriate action
+            # No valid actions available
             return None
 
         if np.random.rand() <= self.epsilon:
@@ -397,13 +438,13 @@ class RLAgent:
             with torch.no_grad():
                 action_values = self.model(state_tensor).squeeze()
 
-                # Mask invalid actions
-                mask = torch.full((self.action_size,), float('-inf'))
-                mask[valid_actions] = 0  # Set valid actions to 0 to keep their original values
-                masked_action_values = action_values + mask
+            # Mask invalid actions
+            mask = torch.full((self.action_size,), float('-inf'))
+            mask[valid_actions] = 0  # Set valid actions to 0 to keep their original values
+            masked_action_values = action_values + mask
 
-                # Select the action with the highest masked Q-value
-                action = torch.argmax(masked_action_values).item()
+            # Select the action with the highest masked Q-value
+            action = torch.argmax(masked_action_values).item()
         return action
 
     def replay(self):
@@ -495,6 +536,51 @@ class RLAgent:
 
             print(f"Episode {episode + 1}/{episodes}, Total Reward: {total_reward}, Epsilon: {self.epsilon:.2f}")
 
+    def evaluate(self):
+        self.model.eval()  # Set the model to evaluation mode
+        self.epsilon = 0  # No exploration during evaluation
+        max_steps = 100  # Define maximum steps for evaluation
+
+        state = self.bridge_builder.get_state()
+        total_reward = 0
+
+        for step in range(max_steps):
+            if not self.bridge_builder.evaluating:
+                print("Evaluation stopped by user.")
+                break
+
+            action = self.choose_action(state)
+            if action is None:
+                print("No valid actions available. Ending evaluation.")
+                break
+
+            action_type, node1_id, node2_id = self.decode_action(action)
+            if action_type is None:
+                continue
+
+            # Perform action
+            if action_type == 'add':
+                success = self.bridge_builder.connect_nodes(node1_id, node2_id)
+            else:
+                success = self.bridge_builder.remove_link(node1_id, node2_id)
+
+            # Update GUI
+            self.bridge_builder.root.update_idletasks()
+            self.bridge_builder.root.update()
+
+            # Get reward and next state
+            reward = self.bridge_builder.calculate_reward()
+            next_state = self.bridge_builder.get_state()
+
+            total_reward += reward
+            state = next_state
+
+            # Sleep briefly to visualize changes
+            self.bridge_builder.root.after(100)
+
+        print(f"Evaluation completed. Total Reward: {total_reward}")
+        self.model.train()  # Set the model back to training mode if needed
+
     def encode_action(self, action_type_index, node1_id, node2_id):
         total_actions_per_type = MAX_NODES * MAX_NODES
         node_pair_index = node1_id * MAX_NODES + node2_id
@@ -519,10 +605,9 @@ class RLAgent:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = BridgeBuilder(root)
-    root.mainloop()
 
-    # After closing the GUI, calculate and print node loads
-    node_loads = app.calculate_node_loads()
-    for node_id, load in node_loads.items():
-        print(f"Node {node_id}: Total Load = {load:.2f} grams")
+    # Initialize BridgeBuilder with random nodes
+    app = BridgeBuilder(root)
+
+    # Start the main GUI loop
+    root.mainloop()
